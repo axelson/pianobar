@@ -343,6 +343,13 @@ BarUiActCallback(BarUiActMoveSong) {
 
 /*	pause
  */
+BarUiActCallback(BarUiActStop) {
+	/* pause if locked, if locked, stay paused */
+	pthread_mutex_trylock (&app->player.pauseMutex);
+}
+
+/*	pause
+ */
 BarUiActCallback(BarUiActPause) {
 	/* already locked => unlock/unpause */
 	if (pthread_mutex_trylock (&app->player.pauseMutex) == EBUSY) {
