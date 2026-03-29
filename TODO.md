@@ -1,0 +1,2 @@
+- write CLAUDE.md
+- Compile staticly so it can run on Nerves via Buildroot
