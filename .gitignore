@@ -7,3 +7,4 @@ pianobar
 libpiano.a
 libpiano.so*
 waitress-test
+.claude/settings.local.json
