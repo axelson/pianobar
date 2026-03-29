@@ -10,6 +10,11 @@ online radio Pandora_.
     :target: https://6xq.net/pianobar/pianobar-screenshot.png
     :alt: pianobar screenshot
 
+About this fork
+---------------
+
+Switches to https://github.com/mackron/miniaudio because pianobar kept hanging on macos
+
 Features
 --------
 
