@@ -27,6 +27,7 @@ PIANOBAR_SRC:=\
 		${PIANOBAR_DIR}/main.c \
 		${PIANOBAR_DIR}/debug.c \
 		${PIANOBAR_DIR}/player.c \
+		${PIANOBAR_DIR}/miniaudio_impl.c \
 		${PIANOBAR_DIR}/settings.c \
 		${PIANOBAR_DIR}/terminal.c \
 		${PIANOBAR_DIR}/ui_act.c \
@@ -58,18 +59,23 @@ LIBGCRYPT_LDFLAGS:=$(shell $(PKG_CONFIG) --libs libgcrypt)
 LIBJSONC_CFLAGS:=$(shell $(PKG_CONFIG) --cflags json-c 2>/dev/null || $(PKG_CONFIG) --cflags json)
 LIBJSONC_LDFLAGS:=$(shell $(PKG_CONFIG) --libs json-c 2>/dev/null || $(PKG_CONFIG) --libs json)
 
-LIBAO_CFLAGS:=$(shell $(PKG_CONFIG) --cflags ao)
-LIBAO_LDFLAGS:=$(shell $(PKG_CONFIG) --libs ao)
+# miniaudio: header-only, no pkg-config needed.
+# On Linux, miniaudio needs -ldl for dynamic backend loading.
+MINIAUDIO_OS := $(shell uname)
+ifeq (${MINIAUDIO_OS},Linux)
+	MINIAUDIO_LDFLAGS := -ldl
+else
+	MINIAUDIO_LDFLAGS :=
+endif
 
 # combine all flags
 ALL_CFLAGS:=${CFLAGS} -I ${LIBPIANO_INCLUDE} \
 			${LIBAV_CFLAGS} ${LIBCURL_CFLAGS} \
-			${LIBGCRYPT_CFLAGS} ${LIBJSONC_CFLAGS} \
-			${LIBAO_CFLAGS}
+			${LIBGCRYPT_CFLAGS} ${LIBJSONC_CFLAGS}
 ALL_LDFLAGS:=${LDFLAGS} -lpthread -lm \
 			${LIBAV_LDFLAGS} ${LIBCURL_LDFLAGS} \
 			${LIBGCRYPT_LDFLAGS} ${LIBJSONC_LDFLAGS} \
-			${LIBAO_LDFLAGS}
+			${MINIAUDIO_LDFLAGS}
 
 # Be verbose if V=1 (gnu autotools’ --disable-silent-rules)
 SILENTCMD:=@

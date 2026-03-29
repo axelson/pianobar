@@ -105,49 +105,38 @@ p->pipeFd = -1;
 
 ### 4d. `openDevice` (lines 338–376) — largest change
 
-**Live audio path** — replace `ao_default_driver_id()` + `ao_open_live()` with miniaudio push mode (callback-less mode, enabled by setting `dataCallback = NULL`):
+> **Surprise:** `ma_device_write` does not exist as a public API in miniaudio v0.11.
+> The internal per-backend functions (e.g. `ma_device_write__alsa`) exist but are
+> not exposed. Setting `dataCallback = NULL` is also not a supported "push mode" —
+> miniaudio v0.11 requires a data callback. The plan below reflects what was actually
+> implemented: a `ma_pcm_rb` ring buffer bridging `BarAoPlayThread` and the callback.
+
+**Live audio path** — `player_t` gets an additional field `ma_pcm_rb maRingBuf`. A static callback `maDataCallback` is added above `openDevice`; it reads from the ring buffer and writes to the hardware output, zeroing any frames it cannot fill (underrun silence). `openDevice` initialises both the ring buffer and the device:
 
 ```c
-ma_device_config config = ma_device_config_init(ma_device_type_playback);
-config.playback.format   = ma_format_s16;
-config.playback.channels = cp->ch_layout.nb_channels;
-config.sampleRate        = getSampleRate(player);
-config.dataCallback      = NULL;  /* push mode: caller calls ma_device_write() */
+/* ring buffer: 8192 frames (~185ms at 44100Hz) */
+ma_pcm_rb_init(ma_format_s16, channels, 8192, NULL, NULL, &player->maRingBuf);
 
-if (ma_device_init(NULL, &config, &player->maDevice) != MA_SUCCESS) {
-    BarUiMsg(player->settings, MSG_ERR, "Cannot open audio device.\n");
-    return false;
-}
-if (ma_device_start(&player->maDevice) != MA_SUCCESS) {
-    ma_device_uninit(&player->maDevice);
-    BarUiMsg(player->settings, MSG_ERR, "Cannot start audio device.\n");
-    return false;
-}
+ma_device_config config  = ma_device_config_init(ma_device_type_playback);
+config.playback.format   = ma_format_s16;
+config.playback.channels = channels;
+config.sampleRate        = sampleRate;
+config.dataCallback      = maDataCallback;
+config.pUserData         = player;
+
+ma_device_init(NULL, &config, &player->maDevice);
+ma_device_start(&player->maDevice);
 player->maDeviceOpen = true;
 ```
 
-**Audio pipe path** — miniaudio has no raw-file driver, so replace with direct POSIX I/O. Preserve the existing FIFO validation (`stat` / `S_ISFIFO`), then:
+**Audio pipe path** — unchanged from the original plan: FIFO validation then `open(O_WRONLY)`.
+
+### 4e. `finish`
 
 ```c
-player->pipeFd = open(player->settings->audioPipe, O_WRONLY);
-if (player->pipeFd < 0) {
-    BarUiMsg(player->settings, MSG_ERR, "Cannot open audio pipe file.\n");
-    return false;
-}
-```
-
-Note: `open(O_WRONLY)` on a named pipe blocks until a reader connects — same behavior as libao's raw driver.
-
-### 4e. `finish` (lines 510–511)
-
-```c
-// remove:
-ao_close(player->aoDev);
-player->aoDev = NULL;
-
-// add:
 if (player->maDeviceOpen) {
     ma_device_uninit(&player->maDevice);
+    ma_pcm_rb_uninit(&player->maRingBuf);  /* added vs. original plan */
     player->maDeviceOpen = false;
 }
 if (player->pipeFd >= 0) {
@@ -158,53 +147,41 @@ if (player->pipeFd >= 0) {
 
 ### 4f. `BarAoPlayThread` hot path (lines 596–597)
 
-```c
-// remove:
-ao_play(player->aoDev, (char *) filteredFrame->data[0],
-        filteredFrame->nb_samples * numChannels * bps);
+The pipe path is unchanged from the original plan. The live audio path writes into the ring buffer instead of calling `ma_device_write`:
 
-// add:
-const size_t byteCount = (size_t)filteredFrame->nb_samples * numChannels * bps;
-if (player->pipeFd >= 0) {
-    /* audio_pipe mode: raw write to FIFO */
-    const char *buf = (const char *)filteredFrame->data[0];
-    size_t remaining = byteCount;
-    while (remaining > 0) {
-        ssize_t n = write(player->pipeFd, buf, remaining);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            /* broken pipe — reader closed; signal quit */
-            pthread_mutex_lock(&player->lock);
-            player->doQuit = true;
-            pthread_mutex_unlock(&player->lock);
-            break;
-        }
-        buf += n;
-        remaining -= n;
+```c
+const char *buf = (const char *)filteredFrame->data[0];
+ma_uint32 remaining = (ma_uint32)filteredFrame->nb_samples;
+while (remaining > 0 && !shouldQuit(player)) {
+    ma_uint32 n = remaining;
+    void *ptr;
+    if (ma_pcm_rb_acquire_write(&player->maRingBuf, &n, &ptr) != MA_SUCCESS) break;
+    if (n == 0) {
+        sched_yield();  /* ring buffer full; yield to audio callback thread */
+        continue;
     }
-} else {
-    /* miniaudio push mode — blocks until ring buffer accepts data */
-    ma_uint32 framesWritten;
-    ma_device_write(&player->maDevice,
-            filteredFrame->data[0],
-            (ma_uint32)filteredFrame->nb_samples,
-            &framesWritten);
+    memcpy(ptr, buf, (size_t)n * numChannels * bps);
+    ma_pcm_rb_commit_write(&player->maRingBuf, n);
+    buf += (size_t)n * numChannels * bps;
+    remaining -= n;
 }
 ```
 
-`ma_device_write` takes a frame count (not byte count); miniaudio derives the byte size from the device config. It blocks when the internal ring buffer is full, preserving `ao_play`'s back-pressure behavior.
+`ma_pcm_rb` is lock-free and safe for single-producer / single-consumer use across threads. `BarAoPlayThread` is the sole writer; `maDataCallback` (on miniaudio's audio thread) is the sole reader.
 
 ---
 
 ## Step 5 — Threading model
 
-No changes needed. The existing two-thread design is fully compatible:
+The existing two-thread design is preserved, but a **third thread** is now involved: miniaudio's internal audio callback thread.
 
-- `BarPlayerThread` calls `openDevice()` then spawns `BarAoPlayThread`.
-- `BarAoPlayThread` calls `ma_device_write()` (or `write()`) directly, just as it called `ao_play()`.
-- The `aoplayLock` / `aoplayCond` handshake between the threads guards the ffmpeg buffer — unrelated to the audio output API.
+| Thread | Role |
+|---|---|
+| `BarPlayerThread` | Decodes packets, feeds ffmpeg filter graph |
+| `BarAoPlayThread` | Pulls filtered frames, writes to `ma_pcm_rb` (or pipe fd) |
+| miniaudio audio thread | `maDataCallback` drains `ma_pcm_rb` to hardware |
 
-miniaudio runs its own background thread internally to drain the ring buffer to hardware, but that is entirely hidden behind `ma_device_write`. pianobar code does not interact with it.
+The `aoplayLock` / `aoplayCond` handshake between the decoder and `BarAoPlayThread` is unchanged. The ring buffer is the only shared state between `BarAoPlayThread` and the miniaudio thread; `ma_pcm_rb` is lock-free so no additional synchronization is needed.
 
 ---
 
@@ -224,14 +201,16 @@ miniaudio runs its own background thread internally to drain the ring buffer to 
 
 ---
 
-## Potential issues
+## Surprises encountered during implementation
 
-**Push mode version requirement:** `dataCallback = NULL` push mode requires miniaudio 0.10.x+. Document the minimum version in `src/miniaudio.h` or a comment.
+**`ma_device_write` is not a public API.** The plan assumed a push mode accessible via `ma_device_write()` with `dataCallback = NULL`. In miniaudio v0.11 neither exists publicly — internal per-backend write functions (`ma_device_write__alsa` etc.) are not exposed, and omitting `dataCallback` is not a supported configuration. The fix was to use `ma_pcm_rb` as an explicit intermediary and drive output from a real `dataCallback`. This added one struct field (`maRingBuf`) and one static function (`maDataCallback`) but kept all other changes as planned.
 
-**`ma_device_start` before write on macOS:** CoreAudio requires the device to be started before `ma_device_write` is called. The plan already does this inside `openDevice`.
+**`ma_yield` is `static inline` in the impl unit only.** The plan called `ma_yield()` for the ring-buffer-full spin case, but this symbol is not visible to translation units that include `miniaudio.h` without `MINIAUDIO_IMPLEMENTATION`. Replaced with POSIX `sched_yield()` (added `#include <sched.h>`).
+
+## Remaining potential issues
 
 **Sample rate rejection:** If `getSampleRate()` returns a rate unsupported by the hardware, `ma_device_init` returns `MA_FORMAT_NOT_SUPPORTED`. The existing fallback (rate 0 → stream native rate) already avoids most cases; the error message covers the rest.
 
-**`errno.h`:** The pipe write path uses `errno`. Add `#include <errno.h>` to `player.c` if not already transitively included.
+**Ring buffer underruns:** If `BarAoPlayThread` stalls (e.g. during a network fetch), `maDataCallback` will exhaust the ring buffer and output silence. This is audible as a brief dropout but is not a crash. The existing ffmpeg buffer health logic in the decoder thread mitigates this.
 
-**Audio pipe output format:** The pipe output will be raw interleaved S16 in native byte order — identical to what libao's raw driver produced with `AO_FMT_NATIVE`. No change in behavior for pipe consumers.
+**Audio pipe output format:** The pipe output is raw interleaved S16 in native byte order — identical to what libao's raw driver produced with `AO_FMT_NATIVE`. No change in behavior for pipe consumers.

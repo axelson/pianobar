@@ -31,7 +31,7 @@ THE SOFTWARE.
 #include <stdint.h>
 #include <signal.h>
 
-#include <ao/ao.h>
+#include "miniaudio.h"
 #include <libavformat/avformat.h>
 #include <libavfilter/avfilter.h>
 #include <libavcodec/avcodec.h>
@@ -75,7 +75,10 @@ typedef struct {
 	int64_t lastTimestamp;
 	sig_atomic_t interrupted;
 
-	ao_device *aoDev;
+	ma_device  maDevice;     /* miniaudio device; valid only when maDeviceOpen */
+	ma_pcm_rb  maRingBuf;   /* lock-free ring buffer between play thread and audio callback */
+	bool       maDeviceOpen;
+	int        pipeFd;       /* fd for audio_pipe mode; -1 if unused */
 
 	/* settings (must be set before starting the thread) */
 	double gain;

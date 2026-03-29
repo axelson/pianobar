@@ -27,9 +27,9 @@ THE SOFTWARE.
  * BarPlayerThread
  * 		Sets up the stream and fetches the data into a ffmpeg buffersrc
  * BarAoPlayThread
- * 		Reads data from the filter chain’s sink and hands it over to libao for
- * 		playback.
- * 
+ * 		Reads data from the filter chain’s sink and hands it over to miniaudio
+ * 		for playback.
+ *
  */
 
 #include "config.h"
@@ -42,6 +42,8 @@ THE SOFTWARE.
 #include <limits.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <errno.h>
+#include <sched.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
 
@@ -76,7 +78,6 @@ static void printError (const BarSettings_t * const settings,
 /*	global initialization
  */
 void BarPlayerInit (player_t * const p, const BarSettings_t * const settings) {
-	ao_initialize ();
 	av_log_set_level (AV_LOG_FATAL);
 #ifdef HAVE_AV_REGISTER_ALL
 	av_register_all ();
@@ -105,7 +106,6 @@ void BarPlayerDestroy (player_t * const p) {
 #ifdef HAVE_AVFORMAT_NETWORK_INIT
 	avformat_network_deinit ();
 #endif
-	ao_shutdown ();
 }
 
 void BarPlayerReset (player_t * const p) {
@@ -124,7 +124,8 @@ void BarPlayerReset (player_t * const p) {
 	p->streamIdx = -1;
 	p->lastTimestamp = 0;
 	p->interrupted = 0;
-	p->aoDev = NULL;
+	p->maDeviceOpen = false;
+	p->pipeFd = -1;
 }
 
 /*	Update volume filter
@@ -333,22 +334,40 @@ static bool openFilter (player_t * const player) {
 	return true;
 }
 
-/*	setup libao
+/*	miniaudio data callback: drains the ring buffer into the hardware output.
+ *	Runs on miniaudio's internal audio thread.
+ */
+static void maDataCallback (ma_device *pDevice, void *pOutput, const void *pInput,
+		ma_uint32 frameCount) {
+	player_t * const player = (player_t *) pDevice->pUserData;
+	const ma_uint32 bpf = ma_get_bytes_per_frame (ma_format_s16,
+			pDevice->playback.channels);
+	ma_uint32 framesRead = 0;
+	while (framesRead < frameCount) {
+		ma_uint32 n = frameCount - framesRead;
+		void *ptr;
+		if (ma_pcm_rb_acquire_read (&player->maRingBuf, &n, &ptr) != MA_SUCCESS || n == 0) {
+			break;
+		}
+		memcpy ((char *) pOutput + framesRead * bpf, ptr, n * bpf);
+		ma_pcm_rb_commit_read (&player->maRingBuf, n);
+		framesRead += n;
+	}
+	/* silence any frames we couldn't fill (ring buffer underrun) */
+	if (framesRead < frameCount) {
+		memset ((char *) pOutput + framesRead * bpf, 0,
+				(frameCount - framesRead) * bpf);
+	}
+	(void) pInput;
+}
+
+/*	setup audio output (miniaudio)
  */
 static bool openDevice (player_t * const player) {
 	const AVCodecParameters * const cp = player->st->codecpar;
 
-	ao_sample_format aoFmt;
-	memset (&aoFmt, 0, sizeof (aoFmt));
-	aoFmt.bits = av_get_bytes_per_sample (avformat) * 8;
-	assert (aoFmt.bits > 0);
-	aoFmt.channels = cp->ch_layout.nb_channels;
-	aoFmt.rate = getSampleRate (player);
-	aoFmt.byte_format = AO_FMT_NATIVE;
-
-	int driver = -1;
 	if (player->settings->audioPipe) {
-		// using audio pipe
+		/* audio pipe mode: validate the path is a FIFO, then open for writing */
 		struct stat st;
 		if (stat (player->settings->audioPipe, &st)) {
 			BarUiMsg (player->settings, MSG_ERR, "Cannot stat audio pipe file.\n");
@@ -358,19 +377,45 @@ static bool openDevice (player_t * const player) {
 			BarUiMsg (player->settings, MSG_ERR, "File is not a pipe, error.\n");
 			return false;
 		}
-		driver = ao_driver_id ("raw");
-		if ((player->aoDev = ao_open_file(driver, player->settings->audioPipe, 1, &aoFmt, NULL)) == NULL) {
+		/* open() on a FIFO with O_WRONLY blocks until a reader connects */
+		player->pipeFd = open (player->settings->audioPipe, O_WRONLY);
+		if (player->pipeFd < 0) {
 			BarUiMsg (player->settings, MSG_ERR, "Cannot open audio pipe file.\n");
 			return false;
 		}
-	} else {
-		// use driver from libao configuration
-		driver = ao_default_driver_id ();
-		if ((player->aoDev = ao_open_live (driver, &aoFmt, NULL)) == NULL) {
-			BarUiMsg (player->settings, MSG_ERR, "Cannot open audio device.\n");
-			return false;
-		}
+		return true;
 	}
+
+	const ma_uint32 channels   = (ma_uint32) cp->ch_layout.nb_channels;
+	const ma_uint32 sampleRate = (ma_uint32) getSampleRate (player);
+
+	/* ring buffer: 8192 frames (~185ms at 44100Hz); lock-free single-producer/
+	 * single-consumer: BarAoPlayThread writes, maDataCallback reads. */
+	if (ma_pcm_rb_init (ma_format_s16, channels, 8192, NULL, NULL,
+			&player->maRingBuf) != MA_SUCCESS) {
+		BarUiMsg (player->settings, MSG_ERR, "Cannot init audio ring buffer.\n");
+		return false;
+	}
+
+	ma_device_config config  = ma_device_config_init (ma_device_type_playback);
+	config.playback.format   = ma_format_s16;
+	config.playback.channels = channels;
+	config.sampleRate        = sampleRate;
+	config.dataCallback      = maDataCallback;
+	config.pUserData         = player;
+
+	if (ma_device_init (NULL, &config, &player->maDevice) != MA_SUCCESS) {
+		ma_pcm_rb_uninit (&player->maRingBuf);
+		BarUiMsg (player->settings, MSG_ERR, "Cannot open audio device.\n");
+		return false;
+	}
+	if (ma_device_start (&player->maDevice) != MA_SUCCESS) {
+		ma_device_uninit (&player->maDevice);
+		ma_pcm_rb_uninit (&player->maRingBuf);
+		BarUiMsg (player->settings, MSG_ERR, "Cannot start audio device.\n");
+		return false;
+	}
+	player->maDeviceOpen = true;
 
 	return true;
 }
@@ -507,8 +552,15 @@ static int play (player_t * const player) {
 }
 
 static void finish (player_t * const player) {
-	ao_close (player->aoDev);
-	player->aoDev = NULL;
+	if (player->maDeviceOpen) {
+		ma_device_uninit (&player->maDevice);
+		ma_pcm_rb_uninit (&player->maRingBuf);
+		player->maDeviceOpen = false;
+	}
+	if (player->pipeFd >= 0) {
+		close (player->pipeFd);
+		player->pipeFd = -1;
+	}
 	if (player->fgraph != NULL) {
 		avfilter_graph_free (&player->fgraph);
 		player->fgraph = NULL;
@@ -593,8 +645,46 @@ void *BarAoPlayThread (void *data) {
 
 		const int numChannels = filteredFrame->ch_layout.nb_channels;
 		const int bps = av_get_bytes_per_sample (filteredFrame->format);
-		ao_play (player->aoDev, (char *) filteredFrame->data[0],
-				filteredFrame->nb_samples * numChannels * bps);
+		if (player->pipeFd >= 0) {
+			/* audio pipe mode: write raw S16 PCM directly to the FIFO */
+			const char *buf = (const char *) filteredFrame->data[0];
+			size_t remaining = (size_t) filteredFrame->nb_samples * numChannels * bps;
+			while (remaining > 0) {
+				ssize_t n = write (player->pipeFd, buf, remaining);
+				if (n < 0) {
+					if (errno == EINTR) continue;
+					/* broken pipe: reader closed; signal quit */
+					pthread_mutex_lock (&player->lock);
+					player->doQuit = true;
+					pthread_mutex_unlock (&player->lock);
+					break;
+				}
+				buf += n;
+				remaining -= (size_t) n;
+			}
+		} else {
+			/* miniaudio: write frames into the ring buffer; maDataCallback
+			 * drains it to hardware on miniaudio's audio thread. Spin-yield
+			 * when the ring buffer is full (back-pressure to the decoder). */
+			const char *buf = (const char *) filteredFrame->data[0];
+			ma_uint32 remaining = (ma_uint32) filteredFrame->nb_samples;
+			while (remaining > 0 && !shouldQuit (player)) {
+				ma_uint32 n = remaining;
+				void *ptr;
+				if (ma_pcm_rb_acquire_write (&player->maRingBuf, &n, &ptr) != MA_SUCCESS) {
+					break;
+				}
+				if (n == 0) {
+					/* ring buffer full; yield and retry */
+					sched_yield ();
+					continue;
+				}
+				memcpy (ptr, buf, (size_t) n * numChannels * bps);
+				ma_pcm_rb_commit_write (&player->maRingBuf, n);
+				buf += (size_t) n * numChannels * bps;
+				remaining -= n;
+			}
+		}
 
 		const double timestamp = (double) filteredFrame->pts * timeBase;
 		const unsigned int songPlayed = timestamp;
