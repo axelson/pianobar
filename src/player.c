@@ -43,7 +43,6 @@ THE SOFTWARE.
 #include <assert.h>
 #include <inttypes.h>
 #include <errno.h>
-#include <sched.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
 
@@ -675,8 +674,9 @@ void *BarAoPlayThread (void *data) {
 					break;
 				}
 				if (n == 0) {
-					/* ring buffer full; yield and retry */
-					sched_yield ();
+					/* ring buffer full; sleep ~1/9 of buffer capacity so this
+					 * thread idles instead of busy-spinning at 100% CPU */
+					usleep (20000);
 					continue;
 				}
 				memcpy (ptr, buf, (size_t) n * numChannels * bps);
