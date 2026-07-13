@@ -428,6 +428,14 @@ static void BarMainSetupSigaction () {
 }
 
 int main (int argc, char **argv) {
+	if (argc >= 2 && strcmp (argv[1], "--version") == 0) {
+		printf ("%s %s\n", PACKAGE, VERSION);
+		return 0;
+	}
+
+	/* line-buffer stdout so output is visible when redirected to a file */
+	setvbuf (stdout, NULL, _IOLBF, 0);
+
 	static BarApp_t app;
 
 	debugEnable();
