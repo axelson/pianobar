@@ -1,3 +1,11 @@
+Fork changes (unreleased)
+
+- Replaced libao with miniaudio for audio playback (fixes hangs on macOS)
+- Fixed 100% CPU usage when ring buffer is full (sleep instead of busy-spin)
+- Added --version flag and line-buffered stdout
+- Added Docker-based cross-compilation for Raspberry Pi (ARMv6 and ARMv7)
+  with minimal ffmpeg/libcurl/libgcrypt built from source (~4 MB bundle)
+
 Release 2024.12.21
 
 - Improved network error retrying

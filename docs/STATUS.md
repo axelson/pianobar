@@ -18,22 +18,13 @@ Pianobar runs on a Raspberry Pi 3B+ with Nerves. Pandora login, audio playback, 
 **Binary:** `/root/pianobar/pianobar` with libs in `/root/pianobar/lib/`
 **Run:** `LD_LIBRARY_PATH=/root/pianobar/lib /root/pianobar/pianobar`
 
-## Next Phase: piano_ctl Integration
+## piano_ctl Integration — DONE
 
-Connect the existing `piano_ctl` Elixir app (at `/Users/jason/dev/piano_ex/piano_ctl`) to control pianobar on the Pi. Piano_ctl would run on the Pi itself, communicating with pianobar via local FIFOs, and with remote UIs via distributed Erlang.
+Piano_ctl Elixir app controls pianobar on the Pi via local FIFOs, with distributed Erlang for remote UIs.
 
 ```
 [Remote UI] <--distributed Erlang--> [piano_ctl on Pi] <--FIFOs--> [pianobar on Pi]
 ```
-
-### Open questions
-1. Can piano_ctl be added as a dep in the Nerves project's mix.exs?
-2. Does `beam_notify` work on Nerves (BusyBox shell)?
-3. Which Nerves project manages this Pi's firmware?
-4. Should pianobar be supervised via `Port.open` for auto-restart?
-
-### Handoff
-Full integration plan: `.handoffs/piano-ctl-nerves-integration.md`
 
 ## Cross-Compilation History
 

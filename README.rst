@@ -15,6 +15,18 @@ About this fork
 
 Switches to https://github.com/mackron/miniaudio because pianobar kept hanging on macos
 
+Raspberry Pi / Nerves
++++++++++++++++++++++
+
+This fork includes Docker-based cross-compilation support for running pianobar
+on Raspberry Pi devices with Elixir Nerves. Dockerfiles and build scripts are
+provided for both ARMv6 (Pi Zero W) and ARMv7 (Pi 3B+). The cross-build
+produces a minimal binary plus a ~4 MB shared library bundle (ffmpeg, libcurl,
+libgcrypt, json-c — all built from source for the target architecture).
+
+See ``cross-build-armv7.sh`` and ``Dockerfile.armv7`` (or the armv6 variants)
+for details.
+
 Features
 --------
 
@@ -173,7 +185,7 @@ You need the following software to build pianobar:
 
 - GNU make
 - pthreads
-- libao
+- miniaudio (header-only, vendored in ``include/``)
 - libcurl ≥ 7.32.0
 - gcrypt [1]_
 - json-c
@@ -200,8 +212,8 @@ FAQ
 ---
 
 The audio output does not work as expected. What can I do?
-    pianobar uses libao and most problems are related to a broken libao
-    configuration. Have a look at issue `#167`_ for example.
+    This fork uses miniaudio for audio output. miniaudio auto-selects the
+    platform backend (CoreAudio on macOS, ALSA on Linux, etc.).
 Can I donate money? Do you have a Flattr/Bitcoin/… account?
     No, money is not necessary to continue working on pianobar. There are many
     other ways to support pianobar: Reporting bugs, creating `cool stuff`_
