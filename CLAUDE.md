@@ -1,3 +1,7 @@
+## Status
+
+`docs/STATUS.md` is the single source of truth for project status. Update it at the end of each working session with any progress, decisions, or status changes.
+
 ## Build
 
 ```bash

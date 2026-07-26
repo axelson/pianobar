@@ -1,0 +1,175 @@
+FROM dockcross/linux-armv6
+
+USER root
+
+ENV SYSROOT=/usr/xcc/armv6-unknown-linux-gnueabihf/armv6-unknown-linux-gnueabihf/sysroot
+
+# Install armhf dev packages for libraries that stay on the device (not bundled).
+# libgcrypt, libgpg-error, and libjson-c are built from source below to ensure
+# armv6 compatibility (Debian armhf packages target armv7+).
+RUN dpkg --add-architecture armhf && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      pkg-config \
+      cmake \
+      libasound2-dev:armhf \
+      libssl-dev:armhf \
+      zlib1g-dev:armhf && \
+    rm -rf /var/lib/apt/lists/* && \
+    for lib in libssl libcrypto libz libasound; do \
+      cp -a /usr/lib/arm-linux-gnueabihf/${lib}.so* ${SYSROOT}/usr/lib/ 2>/dev/null || true; \
+      cp -a /usr/lib/arm-linux-gnueabihf/${lib}.a ${SYSROOT}/usr/lib/ 2>/dev/null || true; \
+    done && \
+    cp -r /usr/include/arm-linux-gnueabihf/* ${SYSROOT}/usr/include/ 2>/dev/null || true && \
+    for d in openssl; do \
+      cp -r /usr/include/$d ${SYSROOT}/usr/include/ 2>/dev/null || true; \
+    done && \
+    mkdir -p ${SYSROOT}/usr/lib/pkgconfig && \
+    cp /usr/lib/arm-linux-gnueabihf/pkgconfig/*.pc ${SYSROOT}/usr/lib/pkgconfig/ 2>/dev/null || true && \
+    sed -i \
+      -e 's|/usr/lib/arm-linux-gnueabihf|'"${SYSROOT}"'/usr/lib|g' \
+      -e 's|/usr/include/arm-linux-gnueabihf|'"${SYSROOT}"'/usr/include|g' \
+      -e 's|/lib/arm-linux-gnueabihf|/lib|g' \
+      -e 's|^prefix=/usr$|prefix='"${SYSROOT}"'/usr|' \
+      ${SYSROOT}/usr/lib/pkgconfig/*.pc
+
+# Build libgpg-error from source for armv6
+ARG GPG_ERROR_VERSION=1.47
+RUN curl -sL https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-${GPG_ERROR_VERSION}.tar.bz2 | tar xj -C /tmp && \
+    cd /tmp/libgpg-error-${GPG_ERROR_VERSION} && \
+    ./configure \
+      --host=armv6-unknown-linux-gnueabihf \
+      --prefix=${SYSROOT}/usr \
+      --enable-shared \
+      --disable-static \
+      --disable-doc \
+      --disable-tests \
+      CC=armv6-unknown-linux-gnueabihf-gcc \
+      CFLAGS="--sysroot=${SYSROOT} -march=armv6 -mfpu=vfp -mfloat-abi=hard" \
+      LDFLAGS="--sysroot=${SYSROOT}" && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/libgpg-error-${GPG_ERROR_VERSION}
+
+# Build libgcrypt from source for armv6 (--disable-asm avoids ARMv8 crypto assembly)
+ARG GCRYPT_VERSION=1.10.3
+RUN curl -sL https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-${GCRYPT_VERSION}.tar.bz2 | tar xj -C /tmp && \
+    cd /tmp/libgcrypt-${GCRYPT_VERSION} && \
+    ./configure \
+      --host=armv6-unknown-linux-gnueabihf \
+      --prefix=${SYSROOT}/usr \
+      --with-gpg-error-prefix=${SYSROOT}/usr \
+      --enable-shared \
+      --disable-static \
+      --disable-doc \
+      --disable-asm \
+      CC=armv6-unknown-linux-gnueabihf-gcc \
+      CFLAGS="--sysroot=${SYSROOT} -march=armv6 -mfpu=vfp -mfloat-abi=hard" \
+      LDFLAGS="--sysroot=${SYSROOT} -L${SYSROOT}/usr/lib" && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/libgcrypt-${GCRYPT_VERSION}
+
+# Build json-c from source for armv6
+ARG JSON_C_VERSION=0.17
+RUN curl -sL https://s3.amazonaws.com/json-c_releases/releases/json-c-${JSON_C_VERSION}.tar.gz | tar xz -C /tmp && \
+    mkdir -p /tmp/json-c-build && cd /tmp/json-c-build && \
+    cmake /tmp/json-c-${JSON_C_VERSION} \
+      -DCMAKE_C_COMPILER=armv6-unknown-linux-gnueabihf-gcc \
+      -DCMAKE_SYSTEM_NAME=Linux \
+      -DCMAKE_SYSTEM_PROCESSOR=arm \
+      -DCMAKE_SYSROOT=${SYSROOT} \
+      -DCMAKE_INSTALL_PREFIX=${SYSROOT}/usr \
+      -DCMAKE_C_FLAGS="-march=armv6 -mfpu=vfp -mfloat-abi=hard" \
+      -DBUILD_SHARED_LIBS=ON \
+      -DBUILD_STATIC_LIBS=OFF \
+      -DBUILD_TESTING=OFF && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/json-c-${JSON_C_VERSION} /tmp/json-c-build
+
+# Build minimal ffmpeg from source (only AAC/MP3 decoders + HTTP streaming)
+ARG FFMPEG_VERSION=5.1.6
+RUN curl -sL https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz | tar xJ -C /tmp && \
+    cd /tmp/ffmpeg-${FFMPEG_VERSION} && \
+    PKG_CONFIG_PATH=${SYSROOT}/usr/lib/pkgconfig \
+    ./configure \
+      --cross-prefix=armv6-unknown-linux-gnueabihf- \
+      --arch=armv6 \
+      --cpu=arm1176jzf-s \
+      --target-os=linux \
+      --enable-cross-compile \
+      --sysroot=${SYSROOT} \
+      --prefix=${SYSROOT}/usr \
+      --enable-shared \
+      --disable-static \
+      --disable-programs \
+      --disable-doc \
+      --disable-everything \
+      --enable-openssl \
+      --enable-decoder=aac \
+      --enable-decoder=aac_latm \
+      --enable-decoder=mp3 \
+      --enable-decoder=mp3float \
+      --enable-demuxer=aac \
+      --enable-demuxer=mp3 \
+      --enable-demuxer=mov \
+      --enable-parser=aac \
+      --enable-parser=mpegaudio \
+      --enable-protocol=http \
+      --enable-protocol=https \
+      --enable-protocol=tcp \
+      --enable-protocol=tls \
+      --enable-protocol=file \
+      --enable-filter=volume \
+      --enable-filter=aformat \
+      --enable-filter=aresample \
+      --enable-filter=abuffer \
+      --enable-filter=abuffersink \
+      --enable-swresample \
+      --enable-avfilter \
+      --disable-avdevice \
+      --disable-postproc \
+      --disable-swscale && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}
+
+# Build minimal libcurl from source (HTTP/HTTPS via OpenSSL only)
+ARG CURL_VERSION=8.7.1
+RUN curl -sL https://curl.se/download/curl-${CURL_VERSION}.tar.xz | tar xJ -C /tmp && \
+    cd /tmp/curl-${CURL_VERSION} && \
+    PKG_CONFIG_PATH=${SYSROOT}/usr/lib/pkgconfig \
+    ./configure \
+      --host=armv6-unknown-linux-gnueabihf \
+      --prefix=${SYSROOT}/usr \
+      --with-openssl \
+      --without-librtmp \
+      --without-libssh2 \
+      --without-libidn2 \
+      --without-nghttp2 \
+      --without-brotli \
+      --without-zstd \
+      --without-libpsl \
+      --disable-ldap \
+      --disable-ldaps \
+      --disable-rtsp \
+      --disable-dict \
+      --disable-telnet \
+      --disable-tftp \
+      --disable-pop3 \
+      --disable-imap \
+      --disable-smb \
+      --disable-smtp \
+      --disable-gopher \
+      --disable-mqtt \
+      --disable-manual \
+      --disable-docs \
+      --enable-shared \
+      --disable-static \
+      CC=armv6-unknown-linux-gnueabihf-gcc \
+      CFLAGS="--sysroot=${SYSROOT}" \
+      LDFLAGS="--sysroot=${SYSROOT}" && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/curl-${CURL_VERSION}

@@ -1,0 +1,16 @@
+FROM dockcross/linux-armv7
+
+USER root
+
+RUN dpkg --add-architecture armhf && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libavcodec-dev:armhf \
+      libavformat-dev:armhf \
+      libavutil-dev:armhf \
+      libavfilter-dev:armhf \
+      libcurl4-openssl-dev:armhf \
+      libgcrypt20-dev:armhf \
+      libjson-c-dev:armhf \
+      libasound2-dev:armhf && \
+    rm -rf /var/lib/apt/lists/*

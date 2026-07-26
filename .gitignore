@@ -8,3 +8,6 @@ libpiano.a
 libpiano.so*
 waitress-test
 .claude/settings.local.json
+armv6-libs/
+armv7-libs/
+dockcross-*
